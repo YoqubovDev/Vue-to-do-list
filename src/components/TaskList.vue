@@ -1,119 +1,188 @@
 <template>
   <div class="task-list">
-    <draggable 
-      v-model="taskList" 
-      item-key="id"
-      ghost-class="ghost"
-      handle=".drag-handle"
-      animation="200"
-      @end="onDragEnd"
+    <div 
+      ref="listRef"
+      class="task-items-container"
     >
-      <template #item="{element: task, index}">
-        <TaskItem 
-          :task="task" 
-          :index="index"
-          @toggle-status="onTaskStatusChange"
-          @remove-task="onTaskRemove"
-        />
-      </template>
-    </draggable>
+      <TaskItem
+        v-for="(task, index) in filteredValidTasks"
+        :key="task?.id || index"
+        :task="task"
+        :index="index"
+        @toggle-status="onTaskStatusChange"
+        @remove-task="onTaskRemove"
+      />
+    </div>
   </div>
 </template>
 
 <script setup>
-import { computed, watch } from 'vue';
-import draggable from 'vuedraggable';
+// Update imports to ensure proper order and remove unused ones
+import { 
+  computed, 
+  watch, 
+  toRefs, 
+  ref, 
+  nextTick, 
+  onMounted, 
+  onUnmounted 
+} from 'vue';
+import Sortable from 'sortablejs';
 import TaskItem from './TaskItem.vue';
+
+// Update the emits definition to be more explicit
+const emit = defineEmits({
+  'update:tasks': (tasks) => Array.isArray(tasks),
+  'save-tasks': () => true
+});
 
 const props = defineProps({
   tasks: {
     type: Array,
-    required: true
+    required: true,
+    default: () => []
   },
   filter: {
     type: String,
-    required: true
+    required: true,
+    default: 'all'
   },
   categoryFilter: {
     type: String,
-    required: true
+    required: true,
+    default: 'all'
   },
   searchQuery: {
     type: String,
-    required: true
+    required: true,
+    default: ''
   }
 });
 
-const emit = defineEmits(['update:tasks', 'save-tasks']);
+// Initialize refs and state
+const { tasks, filter, categoryFilter, searchQuery } = toRefs(props);
+const listRef = ref(null);
+const currentTasks = ref([]);
+const isInitialized = ref(false);
+let sortableInstance = null;
 
-// Computed property for filtered tasks with two-way binding for draggable
-const taskList = computed({
-  get() {
-    return filteredTasks.value;
-  },
-  set(updatedList) {
-    // When list is reordered, update the original tasks array
-    emit('update:tasks', mergeTaskLists(updatedList));
-    emit('save-tasks');
+// Simplified initialization function
+function initializeSortable() {
+  if (!listRef.value || !isInitialized.value) return;
+  
+  if (sortableInstance) {
+    sortableInstance.destroy();
   }
-});
 
-// Computed property for filtered tasks based on filters
+  sortableInstance = new Sortable(listRef.value, {
+    animation: 150,
+    handle: '.drag-handle',
+    ghostClass: 'ghost',
+    dragClass: 'sortable-drag',
+    onStart: (evt) => {
+      evt.item.style.opacity = '0.5';
+    },
+    onEnd: (evt) => {
+      evt.item.style.opacity = '1';
+      const { oldIndex, newIndex } = evt;
+      if (oldIndex !== newIndex && oldIndex !== undefined && newIndex !== undefined) {
+        const updatedList = [...currentTasks.value];
+        const movedItem = updatedList.splice(oldIndex, 1)[0];
+        updatedList.splice(newIndex, 0, movedItem);
+        
+        
+        const newTasks = mergeTaskLists(updatedList);
+        if (Array.isArray(newTasks)) {
+          emit('update:tasks', newTasks);
+          emit('save-tasks');
+        }
+      }
+    }
+  });
+}
+// Simplified filteredTasks computed
 const filteredTasks = computed(() => {
-  return props.tasks.filter((task) => {
-    const matchesSearch = task.text.toLowerCase().includes(props.searchQuery.toLowerCase());
+  if (!Array.isArray(tasks.value)) return [];
+  
+  return tasks.value.filter((task) => {
+    if (!task || typeof task !== 'object' || !task.id) return false;
+    
+    const matchesSearch = task.text?.toLowerCase().includes((searchQuery.value || '').toLowerCase());
     const matchesFilter =
-        props.filter === 'all' ||
-        (props.filter === 'completed' && task.done) ||
-        (props.filter === 'active' && !task.done);
-    const matchesCategory = props.categoryFilter === 'all' || task.category === props.categoryFilter;
+        filter.value === 'all' ||
+        (filter.value === 'completed' && task.done) ||
+        (filter.value === 'active' && !task.done);
+    const matchesCategory = categoryFilter.value === 'all' || task.category === categoryFilter.value;
     
     return matchesSearch && matchesFilter && matchesCategory;
   });
 });
 
-// Helper function to merge the filtered tasks back into the full task list
-function mergeTaskLists(updatedFilteredList) {
-  // Create a mapping of task IDs to their new positions
-  const updatedIds = updatedFilteredList.map(task => task.id);
+// Create a computed property that filters out invalid tasks
+const filteredValidTasks = computed(() => {
+  return currentTasks.value.filter(task => task && task.id);
+});
+
+// Watch filteredTasks to update currentTasks
+watch(filteredTasks, (newTasks) => {
+  if (!isInitialized.value) return;
   
-  // First, extract all tasks that are in the filtered view into a separate array
-  const tasksInFilteredView = props.tasks.filter(task => updatedIds.includes(task.id));
-  
-  // Then sort that array based on the new ordering in updatedFilteredList
-  tasksInFilteredView.sort((a, b) => {
-    return updatedIds.indexOf(a.id) - updatedIds.indexOf(b.id);
+  nextTick(() => {
+    currentTasks.value = newTasks;
+    // Re-initialize sortable after tasks update
+    initializeSortable();
   });
+}, { immediate: false }); // Remove immediate flag to prevent premature updates
+
+// Add a watch for the tasks prop
+watch(tasks, () => {
+  if (!isInitialized.value) return;
   
-  // Now rebuild the tasks array, preserving items not in the filtered view
-  const newTasks = [...props.tasks];
-  
-  // For each task in our original array
-  for (let i = 0; i < newTasks.length; i++) {
-    // If it's in our filtered view, we'll process it
-    const filteredIndex = tasksInFilteredView.findIndex(t => t.id === newTasks[i].id);
-    
-    if (filteredIndex !== -1) {
-      // Replace it with the correctly ordered task from the filtered view
-      newTasks[i] = tasksInFilteredView[filteredIndex];
-      // Remove the task from our filtered view copy to avoid duplicates
-      tasksInFilteredView.splice(filteredIndex, 1);
-    }
+  nextTick(() => {
+    currentTasks.value = filteredTasks.value;
+    initializeSortable();
+  });
+});
+// Helper function to merge the filtered tasks back into the full task list
+function mergeTaskLists(updatedList) {
+  if (!Array.isArray(tasks.value) || !Array.isArray(updatedList)) {
+    return tasks.value || [];
   }
+
+  // Create a map of existing tasks by ID for quick lookup
+  const taskMap = new Map(tasks.value.map(task => [task.id, task]));
+  
+  // Create a new array with the updated order
+  const newTasks = [...tasks.value];
+  
+  // Update the positions based on the updated list
+  updatedList.forEach((task, index) => {
+    if (task && task.id) {
+      const existingTask = taskMap.get(task.id);
+      if (existingTask) {
+        // Find the current position of this task
+        const currentIndex = newTasks.findIndex(t => t.id === task.id);
+        if (currentIndex !== -1 && currentIndex !== index) {
+          // Move the task to its new position
+          newTasks.splice(currentIndex, 1);
+          newTasks.splice(index, 0, existingTask);
+        }
+      }
+    }
+  });
   
   return newTasks;
 }
 
 // Event handlers
-function onDragEnd() {
-  emit('save-tasks');
-}
 
 function onTaskStatusChange(task, isDone) {
-  const taskIndex = props.tasks.findIndex(t => t.id === task.id);
+  if (!task?.id || !Array.isArray(tasks.value)) return;
+  
+  const taskIndex = tasks.value.findIndex(t => t?.id === task.id);
   if (taskIndex !== -1) {
-    const updatedTask = { ...props.tasks[taskIndex], done: isDone };
-    const updatedTasks = [...props.tasks];
+    const updatedTask = { ...tasks.value[taskIndex], done: isDone };
+    const updatedTasks = [...tasks.value];
     updatedTasks[taskIndex] = updatedTask;
     
     emit('update:tasks', updatedTasks);
@@ -122,11 +191,15 @@ function onTaskStatusChange(task, isDone) {
 }
 
 function onTaskRemove(index) {
+  if (!Array.isArray(filteredTasks.value) || !filteredTasks.value[index]?.id) return;
+  
   const taskId = filteredTasks.value[index].id;
-  const taskIndex = props.tasks.findIndex(t => t.id === taskId);
+  if (!taskId || !Array.isArray(tasks.value)) return;
+  
+  const taskIndex = tasks.value.findIndex(t => t?.id === taskId);
   
   if (taskIndex !== -1) {
-    const updatedTasks = [...props.tasks];
+    const updatedTasks = [...tasks.value];
     updatedTasks.splice(taskIndex, 1);
     
     emit('update:tasks', updatedTasks);
@@ -134,9 +207,42 @@ function onTaskRemove(index) {
   }
 }
 
-// Watch for filter changes to ensure the list updates
-watch([() => props.filter, () => props.searchQuery, () => props.categoryFilter], () => {
-  // This is needed for reactivity when filters change
+// Simplified watch for filters
+watch([filter, searchQuery, categoryFilter], () => {
+  if (isInitialized.value) {
+    nextTick(initializeSortable);
+  }
+});
+
+// Watch for changes in the list reference to initialize sortable
+watch(listRef, (newVal) => {
+  if (newVal && isInitialized.value) {
+    nextTick(initializeSortable);
+  }
+});
+
+// Update onMounted hook to ensure proper initialization order
+onMounted(() => {
+  nextTick()
+    .then(() => {
+      // Set initial tasks
+      currentTasks.value = filteredTasks.value;
+      // Mark as initialized
+      isInitialized.value = true;
+      // Initialize sortable after everything is ready
+      return nextTick();
+    })
+    .then(() => {
+      initializeSortable();
+    });
+});
+
+// Cleanup on unmount
+onUnmounted(() => {
+  if (sortableInstance) {
+    sortableInstance.destroy();
+    sortableInstance = null;
+  }
 });
 </script>
 
@@ -145,16 +251,38 @@ watch([() => props.filter, () => props.searchQuery, () => props.categoryFilter],
   padding: 0;
 }
 
+.task-items-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 10px; /* Ensure container is visible even when empty */
+}
+
+/* Improve animation timing */
+.flip-list-move {
+  transition: transform 0.3s ease; /* Slightly faster transition */
+}
+
+.flip-list-enter-active,
+.flip-list-leave-active {
+  transition: all 0.3s ease;
+}
+
+.flip-list-enter-from,
+.flip-list-leave-to {
+  opacity: 0;
+  transform: translateX(30px);
+}
+
+.sortable-drag {
+  opacity: 0;
+}
+
 /* Ghost class for dragging */
 :deep(.ghost) {
   opacity: 0.5;
   background: #c8ebfb;
   border: 1px dashed #4a9eff;
-}
-
-/* Animation for list items */
-:deep(.flip-list-move) {
-  transition: transform 0.5s;
 }
 
 /* Define animation keyframes that TaskItem uses */
